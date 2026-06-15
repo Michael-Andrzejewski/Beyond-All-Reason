@@ -1,34 +1,42 @@
 -- game_micro_wars
+-- Micro Wars game mode: preset armies, configurable victory, on-screen round timer.
 
-if not gadgetHandler:IsSyncedCode() then
-    return
-end
-
--- Load mod options
 local modOptions = Spring.GetModOptions() or {}
 
 local microWarsEnabled = modOptions.micro_wars_enabled or false
 if not microWarsEnabled then
-    return false -- Disable this gadget if Micro Wars is not enabled
+    return false  -- inert unless Micro Wars is enabled (applies in both synced and unsynced)
 end
 
-local roundTime = (modOptions.round_time or 5) * 60 * 30 -- Convert minutes to game frames (30 frames per second)
-local numberOfControlPoints = modOptions.number_of_control_points or 10
-local productionMode = modOptions.production_mode or false
-local maxRoundsMode = modOptions.max_rounds_mode or false
-local maxNumberOfRounds = modOptions.max_number_of_rounds or 10
-local controlPointUnitConversion = modOptions.control_point_unit_conversion or 1
-local allowRoundResign = modOptions.allow_round_resign or false
-local battlefieldMode = modOptions.micro_wars_battlefield_mode or true
-local endRoundEarlyPercentage = modOptions.end_round_early_percentage or 50
+-- Settings (set via lobby modoptions or the host script's [MODOPTIONS])
+local roundTimeMin   = tonumber(modOptions.round_time) or 5
+local roundTime      = math.floor(roundTimeMin * 60 * 30)          -- frames; 0 = no round timer
+local wipeoutOnly    = modOptions.micro_wars_wipeout_only or false  -- only win by destroying the enemy army
+local earlyPct       = tonumber(modOptions.end_round_early_percentage) or 50
+local unitsPerRoundMultiplier = tonumber(modOptions.units_per_round) or 1
+local selectedComposition = modOptions.preset_army_compositions or "Basic T1 - T3"
+local showTimer      = (modOptions.micro_wars_show_timer ~= false)  -- default true
 
--- Correct initialization for despawnUnits
-local despawnUnits = true -- Default value
-if modOptions.micro_wars_despawn == nil then
-    despawnUnits = true
-else
+local despawnUnits = true
+if modOptions.micro_wars_despawn ~= nil then
     despawnUnits = modOptions.micro_wars_despawn
 end
+
+function gadget:GetInfo()
+    return {
+        name    = "Micro Wars",
+        desc    = "Micro Wars: preset armies, configurable victory, round timer",
+        author  = "Soareverix",
+        date    = "2024",
+        layer   = 0,
+        enabled = true,
+    }
+end
+
+if gadgetHandler:IsSyncedCode() then
+--------------------------------------------------------------------------------
+-- SYNCED: game logic
+--------------------------------------------------------------------------------
 
 local teams = Spring.GetTeamList()
 local gaiaTeamID = Spring.GetGaiaTeamID()
@@ -753,259 +761,330 @@ local unitSpawnConfigs = {
     },
     
 }
+-- ===========================================================================
+-- Micro Wars round / scoring engine
+-- ===========================================================================
 
--- Check which preset is selected in the game options and set the unitSpawnConfig accordingly
-local selectedComposition = modOptions.preset_army_compositions or "Basic T1 - T3"
-local unitSpawnConfig = unitSpawnConfigs[selectedComposition]
+local unitSpawnConfig = unitSpawnConfigs[selectedComposition] or unitSpawnConfigs["Basic T1 - T3"]
 
-local currentRound = 1
+local maxRound = 0
+for r in pairs(unitSpawnConfig) do
+    if type(r) == "number" and r > maxRound then maxRound = r end
+end
+if maxRound == 0 then maxRound = 1 end
+
+local activeTeams = {}
+for _, teamID in ipairs(teams) do
+    if teamID ~= gaiaTeamID then activeTeams[#activeTeams + 1] = teamID end
+end
+
+local currentRound = 0
 local currentRoundFrameStart = 0
-local unitSpawns = {}
+local firstSpawnDone = false
+local matchOver = false
+local unitSpawns = {}              -- teamID -> { unitID }
+local roundWins = {}               -- teamID -> wins
+local initialCommanderPositions = {}
 
-function gadget:GetInfo()
-    return {
-        name      = "Micro Wars",
-        desc      = "Implements the Micro Wars game mode with timed rounds and unit spawns",
-        author    = "Soareverix",
-        date      = "2024",
-        layer     = 0,
-        enabled   = microWarsEnabled,
-    }
+local FIRST_SPAWN_FRAME = 90       -- ~3s: let commanders land before the first wave
+local GRACE = 150                  -- ~5s before a round can be resolved
+
+-- "Maros (Team 0)" style label
+local function teamLabel(teamID)
+    local name
+    local players = Spring.GetPlayerList(teamID)
+    if players and players[1] then
+        name = (Spring.GetPlayerInfo(players[1]))
+    end
+    if not name or name == "" then
+        local _, _, _, isAI = Spring.GetTeamInfo(teamID)
+        name = isAI and "AI" or ("Team " .. teamID)
+    end
+    return name .. " (Team " .. teamID .. ")"
+end
+
+local function allyOf(teamID)
+    local _, _, _, _, _, ally = Spring.GetTeamInfo(teamID)
+    return ally or teamID
+end
+
+local function hpStr(hp)
+    if hp >= 1000 then return string.format("%.0fk HP", hp / 1000) end
+    return string.format("%d HP", math.floor(hp))
 end
 
 local function ResetUnitSpawns()
-    if not despawnUnits then
-        return -- Do not despawn units if despawnUnits is set to false
-    end
-
-    for teamID, units in pairs(unitSpawns) do
-        for _, unitID in ipairs(units) do
-            if Spring.ValidUnitID(unitID) and not Spring.GetUnitIsDead(unitID) then
-                Spring.DestroyUnit(unitID, false, true) -- destroy unit without explosion
-            end
-        end
-    end
-    unitSpawns = {}
-end
-
-local initialCommanderPositions = {}
-local function GetCommanderPosition(teamID)
-    local teamUnits = Spring.GetTeamUnits(teamID)
-    for _, unitID in ipairs(teamUnits) do
-        local unitDefID = Spring.GetUnitDefID(unitID)
-        if unitDefID and UnitDefs[unitDefID].customParams.iscommander then
-            local x, y, z = Spring.GetUnitPosition(unitID)
-            return x, y, z
-        end
-    end
-    -- Fallback to stored initial position if no commander is found
-    if initialCommanderPositions[teamID] then
-        local x, y, z = initialCommanderPositions[teamID][1], initialCommanderPositions[teamID][2], initialCommanderPositions[teamID][3]
-        return x, y, z
-    end
-    -- Ultimate Fallback to team start position if no initial position is stored
-    local x, z = Spring.GetTeamStartPosition(teamID)
-    local y = Spring.GetGroundHeight(x, z)
-    return x, y, z
-end
-
--- Load the units_per_round multiplier
-local unitsPerRoundMultiplier = modOptions.units_per_round or 1
-
-local function SpawnUnitsForTeam(teamID, unitName, unitCount)
-    local teamUnits = unitSpawns[teamID] or {}
-    local x, y, z = GetCommanderPosition(teamID)
-
-    -- Apply unitsPerRoundMultiplier to unitCount
-    unitCount = math.floor(unitCount * unitsPerRoundMultiplier)
-
-    for i = 1, unitCount do
-        local ux = x + math.random(-100, 100)
-        local uz = z + math.random(-100, 100)
-        local uy = Spring.GetGroundHeight(ux, uz)
-        local unitID = Spring.CreateUnit(unitName, ux, uy,uz, 0, teamID)
-        table.insert(teamUnits, unitID)
-        
-        -- Trigger explosion effect for each spawned unit
-        Spring.SpawnCEG("botrailspawn", ux, uy, uz, 0, 0, 0)
-    end
-
-    unitSpawns[teamID] = teamUnits
-end
-
-local firstRoundDelay = 80  -- Corresponds to a 2.7-second delay at 30 fps, right as the commander lands for spawn
-local firstRoundDelayed = (currentRound == 1)  -- Only delay the first round
-
-local function StartNewRound()
-    currentRoundFrameStart = Spring.GetGameFrame()
-    ResetUnitSpawns()
-
-    local spawnConfiguration = unitSpawnConfig[currentRound] or {}
-
-    for _, teamID in ipairs(teams) do
-        if teamID ~= gaiaTeamID then
-            if not firstRoundDelayed then  -- Spawn units immediately if not first round or delay elapsed
-                for _, config in ipairs(spawnConfiguration) do
-                    SpawnUnitsForTeam(teamID, config.unitName, config.count)
+    if despawnUnits then
+        for _, units in pairs(unitSpawns) do
+            for _, unitID in ipairs(units) do
+                if Spring.ValidUnitID(unitID) and not Spring.GetUnitIsDead(unitID) then
+                    Spring.DestroyUnit(unitID, false, true)
                 end
             end
         end
     end
-
-    currentRound = currentRound + 1
-    if maxRoundsMode and currentRound > maxNumberOfRounds then
-        Spring.Echo("Ending game after max number of rounds reached")
-        gadgetHandler:RemoveGadget(self)
+    for _, teamID in ipairs(activeTeams) do
+        unitSpawns[teamID] = {}
     end
+end
+
+local function GetCommanderPosition(teamID)
+    for _, unitID in ipairs(Spring.GetTeamUnits(teamID)) do
+        local udid = Spring.GetUnitDefID(unitID)
+        if udid and UnitDefs[udid].customParams.iscommander then
+            return Spring.GetUnitPosition(unitID)
+        end
+    end
+    if initialCommanderPositions[teamID] then
+        local p = initialCommanderPositions[teamID]
+        return p[1], p[2], p[3]
+    end
+    local x, y, z = Spring.GetTeamStartPosition(teamID)
+    return x, Spring.GetGroundHeight(x, z), z
+end
+
+local function SpawnUnitsForTeam(teamID, unitName, count)
+    local x, y, z = GetCommanderPosition(teamID)
+    count = math.floor(count * unitsPerRoundMultiplier)
+    local list = unitSpawns[teamID] or {}
+    for _ = 1, count do
+        local ux = x + math.random(-100, 100)
+        local uz = z + math.random(-100, 100)
+        local uy = Spring.GetGroundHeight(ux, uz)
+        local unitID = Spring.CreateUnit(unitName, ux, uy, uz, 0, teamID)
+        if unitID then
+            list[#list + 1] = unitID
+            Spring.SpawnCEG("botrailspawn", ux, uy, uz, 0, 0, 0)
+        end
+    end
+    unitSpawns[teamID] = list
+end
+
+-- surviving spawned army; the commander is never in unitSpawns, so it is excluded
+local function armyCount(teamID)
+    local n = 0
+    for _, unitID in ipairs(unitSpawns[teamID] or {}) do
+        if Spring.ValidUnitID(unitID) and not Spring.GetUnitIsDead(unitID) then n = n + 1 end
+    end
+    return n
+end
+
+local function armyHealth(teamID)
+    local hp = 0
+    for _, unitID in ipairs(unitSpawns[teamID] or {}) do
+        if Spring.ValidUnitID(unitID) and not Spring.GetUnitIsDead(unitID) then
+            hp = hp + (Spring.GetUnitHealth(unitID) or 0)
+        end
+    end
+    return hp
+end
+
+local function leadingTeam()
+    local best, bestN, bestHP
+    for _, teamID in ipairs(activeTeams) do
+        local n, hp = armyCount(teamID), armyHealth(teamID)
+        if not best or n > bestN or (n == bestN and hp > bestHP) then
+            best, bestN, bestHP = teamID, n, hp
+        end
+    end
+    return best
+end
+
+local function aliveTeams()
+    local t = {}
+    for _, teamID in ipairs(activeTeams) do
+        if armyCount(teamID) > 0 then t[#t + 1] = teamID end
+    end
+    return t
+end
+
+local function winsLine()
+    local p = {}
+    for _, teamID in ipairs(activeTeams) do
+        p[#p + 1] = string.format("%s %d", teamLabel(teamID), roundWins[teamID] or 0)
+    end
+    return table.concat(p, " | ")
+end
+
+-- publish state for the unsynced timer HUD
+local function publishTimer()
+    if roundTime > 0 and not matchOver then
+        Spring.SetGameRulesParam("microwars_round_end_frame", currentRoundFrameStart + roundTime)
+    else
+        Spring.SetGameRulesParam("microwars_round_end_frame", 0)
+    end
+    Spring.SetGameRulesParam("microwars_round", currentRound)
+end
+
+local function beginRound()
+    currentRound = currentRound + 1
+    currentRoundFrameStart = Spring.GetGameFrame()
+    ResetUnitSpawns()
+    local cfg = unitSpawnConfig[currentRound] or {}
+    for _, teamID in ipairs(activeTeams) do
+        for _, c in ipairs(cfg) do
+            SpawnUnitsForTeam(teamID, c.unitName, c.count)
+        end
+    end
+    publishTimer()
+    Spring.Echo(string.format("Micro Wars: Round %d begins.", currentRound))
+end
+
+local function endMatch()
+    matchOver = true
+    Spring.SetGameRulesParam("microwars_round_end_frame", 0)
+    local winner, bestWins
+    for _, teamID in ipairs(activeTeams) do
+        local w = roundWins[teamID] or 0
+        if not winner or w > bestWins then winner, bestWins = teamID, w end
+    end
+    Spring.Echo("Micro Wars: MATCH OVER. Round wins -- " .. winsLine())
+    if winner then
+        Spring.Echo("Micro Wars: " .. teamLabel(winner) .. " wins the match!")
+        Spring.GameOver({ allyOf(winner) })
+    end
+end
+
+local function resolveRound(winner, reason)
+    local parts = {}
+    for _, teamID in ipairs(activeTeams) do
+        parts[#parts + 1] = string.format("%s: %d units / %s",
+            teamLabel(teamID), armyCount(teamID), hpStr(armyHealth(teamID)))
+    end
+    local scoreboard = table.concat(parts, "   vs   ")
+    if winner then
+        roundWins[winner] = (roundWins[winner] or 0) + 1
+        Spring.Echo(string.format("Micro Wars: Round %d -- %s wins by %s.   %s",
+            currentRound, teamLabel(winner), reason, scoreboard))
+        Spring.Echo("Micro Wars: round wins -- " .. winsLine())
+    else
+        Spring.Echo(string.format("Micro Wars: Round %d -- draw.   %s", currentRound, scoreboard))
+    end
+    if currentRound >= maxRound then
+        endMatch()
+    else
+        beginRound()
+    end
+end
+
+function gadget:Initialize()
+    for _, teamID in ipairs(activeTeams) do
+        unitSpawns[teamID] = {}
+        roundWins[teamID] = 0
+    end
+    Spring.SetGameRulesParam("microwars_round_end_frame", 0)
+    Spring.SetGameRulesParam("microwars_round", 0)
 end
 
 function gadget:GameStart()
-    StartNewRound()
-    Spring.Echo("Micro Wars Started -- Building Disabled")
-end
-
-local function CalculateTeamStrength(teamID)
-    local unitList = Spring.GetTeamUnits(teamID)
-    local totalHealth = 0
-    local totalUnits = #unitList
-    for _, unitID in ipairs(unitList) do
-        if not Spring.GetUnitIsDead(unitID) then
-            totalHealth = totalHealth + Spring.GetUnitHealth(unitID)
-        end
-    end
-    return totalUnits, totalHealth
-end
-
-local function CheckForEarlyEnd()
-    local teamStrengths = {}
-    -- Collect and log details for each team
-    for _, teamID in ipairs(teams) do
-        if teamID ~= gaiaTeamID then
-            local unitCount, totalHealth = CalculateTeamStrength(teamID)
-            table.insert(teamStrengths, {teamID = teamID, unitCount = unitCount, totalHealth = totalHealth})
-            Spring.Echo("Debug: Team", teamID, "- Units:", unitCount, "HP:", totalHealth)
-        end
-    end
-    -- Sort teams by unitCount, break ties with totalHealth
-    table.sort(teamStrengths, function(a, b)
-        if a.unitCount == b.unitCount then
-            return a.totalHealth > b.totalHealth
-        end
-        return a.unitCount > b.unitCount
-    end)
-    -- Compare the strongest team to the second strongest
-    if #teamStrengths > 1 then
-        local strongest = teamStrengths[1]
-        local secondStrongest = teamStrengths[2]
-        if strongest.unitCount >= secondStrongest.unitCount * (1 + endRoundEarlyPercentage / 100) and
-           strongest.totalHealth >= secondStrongest.totalHealth * (1 + endRoundEarlyPercentage / 100) then
-            Spring.Echo("Debug: Ending Round Early - Dominating Team", strongest.teamID, "over Team", secondStrongest.teamID)
-            return strongest.teamID
-        end
-    end
-    return nil
-end
-
-local checkForEarlyEndDelay = 300 -- Delay of 10 seconds (10 * 30 fps)
--- Commonly used helper function to calculate game frames
-local function CalculateFrame(seconds)
-    return seconds * 30  -- 30 frames per second
-end
-
-local roundWins = {}
-
-function gadget:Initialize()
-    for _, teamID in ipairs(teams) do
-        unitSpawns[teamID] = {}
-        if teamID ~= gaiaTeamID then
-            roundWins[teamID] = 0
-        end
-    end
-end
-
-local function AssessVictoryAndEndGame()
-	Spring.Echo("Endgame reached")
-    local winner = nil
-    local maxWins = -1
-    for teamID, wins in pairs(roundWins) do
-        if wins > maxWins then
-            maxWins = wins
-            winner = teamID
-        end
-    end
-    if winner then
-        Spring.Echo("The game ends with Team " .. winner .. " victorious, with " .. maxWins .. " rounds won.")
-        -- End the game with this team as the winner
-        Spring.GameOver({winner})
-    end
+    local victory = wipeoutOnly and "destroy the enemy army"
+        or string.format("+%d%% domination or time", earlyPct)
+    local timer = roundTime > 0 and string.format("%d min/round", roundTimeMin) or "no timer"
+    Spring.Echo(string.format("Micro Wars started. Composition: %s | Victory: %s | %s | building disabled.",
+        selectedComposition, victory, timer))
 end
 
 function gadget:GameFrame(n)
-    -- log initial commander starting positions
-    if n == 90 then
-        for _, teamID in ipairs(teams) do
-            if teamID ~= gaiaTeamID then
-                local teamUnits = Spring.GetTeamUnits(teamID)
-                for _, unitID in ipairs(teamUnits) do
-                    local unitDefID = Spring.GetUnitDefID(unitID)
-                    if unitDefID and UnitDefs[unitDefID].customParams.iscommander then
-                        local x, y, z = Spring.GetUnitPosition(unitID)
-                        initialCommanderPositions[teamID] = {x, y, z}
-                        Spring.Echo("Initial commander position for team", teamID, "recorded at:", x, y, z)
+    if matchOver then return end
+
+    if n == 60 then
+        for _, teamID in ipairs(activeTeams) do
+            for _, unitID in ipairs(Spring.GetTeamUnits(teamID)) do
+                local udid = Spring.GetUnitDefID(unitID)
+                if udid and UnitDefs[udid].customParams.iscommander then
+                    local x, y, z = Spring.GetUnitPosition(unitID)
+                    initialCommanderPositions[teamID] = { x, y, z }
+                    break
+                end
+            end
+        end
+        return
+    end
+
+    if not firstSpawnDone then
+        if n >= FIRST_SPAWN_FRAME then
+            firstSpawnDone = true
+            beginRound()
+        end
+        return
+    end
+
+    local elapsed = n - currentRoundFrameStart
+    if elapsed <= GRACE then return end
+
+    -- 1) wipeout: only one team still has an army
+    local alive = aliveTeams()
+    if #alive <= 1 then
+        resolveRound(alive[1] or leadingTeam(), "enemy army destroyed")
+        return
+    end
+
+    -- 2) domination ratio (skipped when wipeout-only)
+    if not wipeoutOnly then
+        local lead = leadingTeam()
+        if lead then
+            local leadN, leadHP = armyCount(lead), armyHealth(lead)
+            local dominates = true
+            for _, teamID in ipairs(activeTeams) do
+                if teamID ~= lead then
+                    local n2, hp2 = armyCount(teamID), armyHealth(teamID)
+                    if not (leadN >= n2 * (1 + earlyPct / 100) and leadHP >= hp2 * (1 + earlyPct / 100)) then
+                        dominates = false
                         break
                     end
                 end
             end
-        end
-    elseif n >= currentRoundFrameStart + firstRoundDelay and firstRoundDelayed then
-        StartDelayedFirstRound()
-    elseif battlefieldMode then
-        if n >= currentRoundFrameStart + checkForEarlyEndDelay then
-            local endingEarly = CheckForEarlyEnd()
-            if endingEarly or n >= currentRoundFrameStart + roundTime then
-                ConcludeRound(endingEarly)
-            end
-        end
-    else
-        if n >= currentRoundFrameStart + roundTime then
-            StartNewRound()
-        end
-    end
-end
-
-function StartDelayedFirstRound()
-    local spawnConfiguration = unitSpawnConfig[1] or {}
-    for _, teamID in ipairs(teams) do
-        if teamID ~= gaiaTeamID then
-            for _, config in ipairs(spawnConfiguration) do
-                SpawnUnitsForTeam(teamID, config.unitName, config.count)
+            if dominates then
+                resolveRound(lead, string.format("+%d%% domination", earlyPct))
+                return
             end
         end
     end
-    firstRoundDelayed = false
+
+    -- 3) round timer
+    if roundTime > 0 and elapsed >= roundTime then
+        resolveRound(leadingTeam(), "time")
+        return
+    end
 end
 
-function ConcludeRound(endingEarly)
-    if endingEarly then
-        Spring.Echo("Team " .. endingEarly .. " has conclusively won the round early.")
-        roundWins[endingEarly] = (roundWins[endingEarly] or 0) + 1
-    end
-	if currentRound > maxNumberOfRounds then
-		Spring.Echo("The game has ended now.")
-        AssessVictoryAndEndGame()
-    end
-    StartNewRound()
-    
+-- no building in Micro Wars
+function gadget:AllowCommand(unitID, unitDefID, teamID, cmdID)
+    if cmdID < 0 then return false end
+    return true
 end
-
---dynamically prevent building
-function gadget:AllowCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOptions)
-       if cmdID < 0 then  -- build commands are negative numbers corresponding to the unitDefID to be built
-           return false  -- disallow all build commands
-       end
-       return true  -- allow all other commands
-   end
 
 function gadget:Shutdown()
     ResetUnitSpawns()
+end
+
+else
+--------------------------------------------------------------------------------
+-- UNSYNCED: on-screen round-timer HUD
+--------------------------------------------------------------------------------
+
+if showTimer then
+    local GetGameRulesParam = Spring.GetGameRulesParam
+    local GetGameFrame = Spring.GetGameFrame
+    local GetViewGeometry = Spring.GetViewGeometry
+
+    function gadget:DrawScreen()
+        local round = GetGameRulesParam("microwars_round") or 0
+        if round < 1 then return end
+        local endFrame = GetGameRulesParam("microwars_round_end_frame") or 0
+        local vsx, vsy = GetViewGeometry()
+        local label
+        if endFrame > 0 then
+            local remain = (endFrame - GetGameFrame()) / 30
+            if remain < 0 then remain = 0 end
+            label = string.format("Round %d    %d:%02d", round, math.floor(remain / 60), math.floor(remain % 60))
+        else
+            label = "Round " .. round
+        end
+        gl.Color(1, 1, 1, 1)
+        gl.Text(label, vsx * 0.5, vsy - 36, 22, "oc")
+        gl.Color(1, 1, 1, 1)
+    end
+end
+
 end
