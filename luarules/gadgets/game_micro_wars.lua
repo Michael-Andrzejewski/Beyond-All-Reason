@@ -3,7 +3,15 @@
 
 local modOptions = Spring.GetModOptions() or {}
 
-local microWarsEnabled = modOptions.micro_wars_enabled or false
+-- modoption values from the host script can arrive as strings ("0"/"1"); parse them safely.
+-- (In Lua 0 and "0" are truthy, so a naive `x or false` would read an off-switch as on.)
+local function asBool(v, default)
+    if v == nil then return default end
+    if v == false or v == 0 or v == "0" or v == "false" then return false end
+    return true
+end
+
+local microWarsEnabled = asBool(modOptions.micro_wars_enabled, false)
 if not microWarsEnabled then
     return false  -- inert unless Micro Wars is enabled (applies in both synced and unsynced)
 end
@@ -11,16 +19,12 @@ end
 -- Settings (set via lobby modoptions or the host script's [MODOPTIONS])
 local roundTimeMin   = tonumber(modOptions.round_time) or 5
 local roundTime      = math.floor(roundTimeMin * 60 * 30)          -- frames; 0 = no round timer
-local wipeoutOnly    = modOptions.micro_wars_wipeout_only or false  -- only win by destroying the enemy army
+local wipeoutOnly    = asBool(modOptions.micro_wars_wipeout_only, false)  -- only win by destroying the enemy army
 local earlyPct       = tonumber(modOptions.end_round_early_percentage) or 50
 local unitsPerRoundMultiplier = tonumber(modOptions.units_per_round) or 1
 local selectedComposition = modOptions.preset_army_compositions or "Basic T1 - T3"
-local showTimer      = (modOptions.micro_wars_show_timer ~= false)  -- default true
-
-local despawnUnits = true
-if modOptions.micro_wars_despawn ~= nil then
-    despawnUnits = modOptions.micro_wars_despawn
-end
+local showTimer      = asBool(modOptions.micro_wars_show_timer, true)
+local despawnUnits   = asBool(modOptions.micro_wars_despawn, true)
 
 function gadget:GetInfo()
     return {
@@ -785,6 +789,7 @@ local matchOver = false
 local unitSpawns = {}              -- teamID -> { unitID }
 local roundWins = {}               -- teamID -> wins
 local initialCommanderPositions = {}
+local commanders = {}              -- unitID -> teamID (invincible / neutral / energy-generating commanders)
 
 local FIRST_SPAWN_FRAME = 90       -- ~3s: let commanders land before the first wave
 local GRACE = 150                  -- ~5s before a round can be resolved
@@ -967,6 +972,26 @@ local function resolveRound(winner, reason)
     end
 end
 
+function gadget:UnitCreated(unitID, unitDefID, unitTeam)
+    local ud = UnitDefs[unitDefID]
+    if ud and ud.customParams and ud.customParams.iscommander then
+        commanders[unitID] = unitTeam
+        Spring.SetUnitNeutral(unitID, true)               -- enemies ignore the commander
+        Spring.SetTeamResource(unitTeam, "es", 100000)    -- raise energy storage so income accumulates
+        Spring.SetTeamResource(unitTeam, "e", 100000)     -- start full so weapons can fire immediately
+    end
+end
+
+function gadget:UnitDestroyed(unitID)
+    commanders[unitID] = nil
+end
+
+-- commanders take no damage
+function gadget:UnitPreDamaged(unitID, unitDefID, unitTeam, damage)
+    if commanders[unitID] then return 0, 0 end
+    return damage
+end
+
 function gadget:Initialize()
     for _, teamID in ipairs(activeTeams) do
         unitSpawns[teamID] = {}
@@ -986,6 +1011,13 @@ end
 
 function gadget:GameFrame(n)
     if matchOver then return end
+
+    -- commanders generate 10k energy/second for their team
+    if n % 30 == 0 then
+        for _, ct in pairs(commanders) do
+            Spring.AddTeamResource(ct, "e", 10000)
+        end
+    end
 
     if n == 60 then
         for _, teamID in ipairs(activeTeams) do
@@ -1063,6 +1095,14 @@ else
 -- UNSYNCED: on-screen round-timer HUD
 --------------------------------------------------------------------------------
 
+-- commanders are invisible (rendering only; they still anchor spawns)
+function gadget:UnitCreated(unitID, unitDefID, unitTeam)
+    local ud = UnitDefs[unitDefID]
+    if ud and ud.customParams and ud.customParams.iscommander then
+        Spring.SetUnitNoDraw(unitID, true)
+    end
+end
+
 if showTimer then
     local GetGameRulesParam = Spring.GetGameRulesParam
     local GetGameFrame = Spring.GetGameFrame
@@ -1082,7 +1122,7 @@ if showTimer then
             label = "Round " .. round
         end
         gl.Color(1, 1, 1, 1)
-        gl.Text(label, vsx * 0.5, vsy - 36, 22, "oc")
+        gl.Text(label, vsx * 0.5, vsy - 110, 22, "oc")
         gl.Color(1, 1, 1, 1)
     end
 end
