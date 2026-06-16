@@ -765,6 +765,44 @@ local unitSpawnConfigs = {
 		}
     },
     
+	["Cortex Bots"] = {
+		[1] = { {unitName="corthud",count=5}, {unitName="cornecro",count=1}, {unitName="corak",count=3} },
+		[2] = { {unitName="cormando",count=1}, {unitName="cornecro",count=2}, {unitName="corthud",count=10} },
+		[3] = { {unitName="corthud",count=20}, {unitName="corroach",count=3} },
+		[4] = { {unitName="cormort",count=5}, {unitName="corhrk",count=3}, {unitName="corvoyr",count=1}, {unitName="corspec",count=1}, {unitName="corak",count=10} },
+		[5] = { {unitName="corvoyr",count=1}, {unitName="cormort",count=15}, {unitName="corspec",count=2}, {unitName="corsktl",count=1}, {unitName="corak",count=4} },
+		[6] = { {unitName="corsumo",count=2}, {unitName="cornecro",count=4}, {unitName="corvoyr",count=1}, {unitName="corhrk",count=7} },
+		[7] = { {unitName="corshiva",count=3}, {unitName="corvoyr",count=1}, {unitName="corspec",count=1}, {unitName="cormort",count=15}, {unitName="corpyro",count=10}, {unitName="corspy",count=1} },
+		[8] = { {unitName="cordemon",count=3}, {unitName="corpyro",count=30}, {unitName="corkarg",count=3}, {unitName="corshiva",count=5}, {unitName="corcat",count=1}, {unitName="corvoyr",count=1} },
+		[9] = { {unitName="corspec",count=10}, {unitName="corkorg",count=3}, {unitName="cordecom",count=2}, {unitName="corcom",count=1} },
+	},
+
+	["Armada & Cortex Vehicles"] = {
+		[1] = { {unitName="armstump",count=5}, {unitName="armflash",count=3}, {unitName="armsam",count=1} },
+		[2] = { {unitName="armstump",count=1}, {unitName="armjanus",count=3}, {unitName="armsam",count=8} },
+		[3] = { {unitName="armstump",count=7}, {unitName="armfav",count=5}, {unitName="armjanus",count=4} },
+		[4] = { {unitName="corwolv",count=10}, {unitName="corgator",count=5}, {unitName="armsam",count=3}, {unitName="armstump",count=5} },
+		[5] = { {unitName="armmart",count=4}, {unitName="armmark",count=1}, {unitName="armaser",count=1}, {unitName="armfav",count=3}, {unitName="armstump",count=5}, {unitName="armjanus",count=1} },
+		[6] = { {unitName="armlatnk",count=4}, {unitName="correap",count=1}, {unitName="cormart",count=4}, {unitName="armmark",count=1}, {unitName="armgremlin",count=4}, {unitName="armfav",count=10}, {unitName="armmart",count=8} },
+		[7] = { {unitName="armbull",count=3}, {unitName="armmanni",count=1}, {unitName="armmark",count=1}, {unitName="armaser",count=1} },
+		[8] = { {unitName="armbull",count=5}, {unitName="armmanni",count=3}, {unitName="armmerl",count=4}, {unitName="armmark",count=3} },
+		[9] = { {unitName="cortrem",count=2}, {unitName="armmanni",count=4}, {unitName="corban",count=1}, {unitName="armfav",count=20}, {unitName="armlatnk",count=1}, {unitName="armpeep",count=3} },
+		[10] = { {unitName="armmanni",count=10}, {unitName="armmark",count=4}, {unitName="armthor",count=1} },
+	},
+
+	["Armada Bots"] = {
+		[1] = { {unitName="armrock",count=5}, {unitName="armwar",count=1}, {unitName="armrectr",count=1}, {unitName="armflea",count=3}, {unitName="armpw",count=4} },
+		[2] = { {unitName="armwar",count=3}, {unitName="armrectr",count=3} },
+		[3] = { {unitName="armrock",count=10}, {unitName="armham",count=4}, {unitName="armrectr",count=1}, {unitName="armflea",count=5} },
+		[4] = { {unitName="armmav",count=1}, {unitName="armham",count=10}, {unitName="armrock",count=15}, {unitName="armflea",count=5} },
+		[5] = { {unitName="armfido",count=4}, {unitName="armmark",count=1}, {unitName="armaser",count=1}, {unitName="armfast",count=12} },
+		[6] = { {unitName="armzeus",count=3}, {unitName="armfido",count=4}, {unitName="armmark",count=1}, {unitName="armaser",count=1}, {unitName="armsnipe",count=1}, {unitName="armflea",count=15} },
+		[7] = { {unitName="armfast",count=25}, {unitName="armsnipe",count=5}, {unitName="armzeus",count=7}, {unitName="armmark",count=2} },
+		[8] = { {unitName="armfboy",count=1}, {unitName="armzeus",count=4}, {unitName="armflea",count=25} },
+		[9] = { {unitName="armmar",count=4}, {unitName="armzeus",count=8}, {unitName="armsnipe",count=2} },
+		[10] = { {unitName="armraz",count=2}, {unitName="armmar",count=8}, {unitName="armvang",count=2}, {unitName="armpw",count=20} },
+		[11] = { {unitName="armsnipe",count=15}, {unitName="armraz",count=3}, {unitName="armvang",count=1}, {unitName="armrectr",count=4}, {unitName="armmark",count=3}, {unitName="armaser",count=1} },
+	},
 }
 -- ===========================================================================
 -- Micro Wars round / scoring engine
