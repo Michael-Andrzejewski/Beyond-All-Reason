@@ -25,6 +25,7 @@ local unitsPerRoundMultiplier = tonumber(modOptions.units_per_round) or 1
 local selectedComposition = modOptions.preset_army_compositions or "Basic T1 - T3"
 local showTimer      = asBool(modOptions.micro_wars_show_timer, true)
 local despawnUnits   = asBool(modOptions.micro_wars_despawn, true)
+local commanderRadar = asBool(modOptions.micro_wars_commander_radar, false)  -- 50x commander radar
 
 function gadget:GetInfo()
     return {
@@ -979,6 +980,11 @@ function gadget:UnitCreated(unitID, unitDefID, unitTeam)
         Spring.SetUnitNeutral(unitID, true)               -- enemies ignore the commander
         Spring.SetTeamResource(unitTeam, "es", 100000)    -- raise energy storage so income accumulates
         Spring.SetTeamResource(unitTeam, "e", 100000)     -- start full so weapons can fire immediately
+        if commanderRadar then
+            local base = Spring.GetUnitSensorRadius(unitID, "radar") or 0
+            if base <= 0 then base = 2000 end
+            Spring.SetUnitSensorRadius(unitID, "radar", base * 50)   -- 50x radar
+        end
     end
 end
 
@@ -1016,6 +1022,13 @@ function gadget:GameFrame(n)
     if n % 30 == 0 then
         for _, ct in pairs(commanders) do
             Spring.AddTeamResource(ct, "e", 10000)
+        end
+    end
+
+    -- publish live troop counts for the on-screen scoreboard
+    if n % 6 == 0 then
+        for _, teamID in ipairs(activeTeams) do
+            Spring.SetGameRulesParam("microwars_army_" .. teamID, armyCount(teamID))
         end
     end
 
@@ -1092,8 +1105,25 @@ end
 
 else
 --------------------------------------------------------------------------------
--- UNSYNCED: on-screen round-timer HUD
+-- UNSYNCED: round timer + live troop scoreboard; invisible commanders
 --------------------------------------------------------------------------------
+
+local function activeTeamList()
+    local t = {}
+    local gaia = Spring.GetGaiaTeamID()
+    for _, teamID in ipairs(Spring.GetTeamList()) do
+        if teamID ~= gaia then t[#t + 1] = teamID end
+    end
+    return t
+end
+
+local function playerName(teamID)
+    local players = Spring.GetPlayerList(teamID)
+    local name
+    if players and players[1] then name = (Spring.GetPlayerInfo(players[1])) end
+    if not name or name == "" then name = "Team " .. teamID end
+    return name
+end
 
 -- commanders are invisible (rendering only; they still anchor spawns)
 function gadget:UnitCreated(unitID, unitDefID, unitTeam)
@@ -1103,28 +1133,37 @@ function gadget:UnitCreated(unitID, unitDefID, unitTeam)
     end
 end
 
-if showTimer then
-    local GetGameRulesParam = Spring.GetGameRulesParam
-    local GetGameFrame = Spring.GetGameFrame
-    local GetViewGeometry = Spring.GetViewGeometry
+function gadget:DrawScreen()
+    local round = Spring.GetGameRulesParam("microwars_round") or 0
+    if round < 1 then return end
+    local vsx, vsy = Spring.GetViewGeometry()
+    local cx = vsx * 0.5
+    local y = vsy - 110
 
-    function gadget:DrawScreen()
-        local round = GetGameRulesParam("microwars_round") or 0
-        if round < 1 then return end
-        local endFrame = GetGameRulesParam("microwars_round_end_frame") or 0
-        local vsx, vsy = GetViewGeometry()
+    if showTimer then
+        local endFrame = Spring.GetGameRulesParam("microwars_round_end_frame") or 0
         local label
         if endFrame > 0 then
-            local remain = (endFrame - GetGameFrame()) / 30
+            local remain = (endFrame - Spring.GetGameFrame()) / 30
             if remain < 0 then remain = 0 end
             label = string.format("Round %d    %d:%02d", round, math.floor(remain / 60), math.floor(remain % 60))
         else
             label = "Round " .. round
         end
         gl.Color(1, 1, 1, 1)
-        gl.Text(label, vsx * 0.5, vsy - 110, 22, "oc")
-        gl.Color(1, 1, 1, 1)
+        gl.Text(label, cx, y, 22, "oc")
+        y = y - 28
     end
+
+    -- live troop scoreboard, one line per player
+    for _, teamID in ipairs(activeTeamList()) do
+        local troops = Spring.GetGameRulesParam("microwars_army_" .. teamID) or 0
+        local r, g, b = Spring.GetTeamColor(teamID)
+        gl.Color(r or 1, g or 1, b or 1, 1)
+        gl.Text(string.format("%s: %d troops", playerName(teamID), troops), cx, y, 18, "oc")
+        y = y - 22
+    end
+    gl.Color(1, 1, 1, 1)
 end
 
 end
