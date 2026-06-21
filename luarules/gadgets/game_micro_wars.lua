@@ -27,10 +27,11 @@ local showTimer      = asBool(modOptions.micro_wars_show_timer, true)
 local despawnUnits   = asBool(modOptions.micro_wars_despawn, true)
 local commanderRadar = asBool(modOptions.micro_wars_commander_radar, false)  -- 50x commander radar
 
--- Touchdown mode: hold units in the enemy starter zone to score (tug-of-war victory).
-local touchdownMode       = asBool(modOptions.micro_wars_touchdown, false)
-local touchdownWinScore   = tonumber(modOptions.touchdown_win_score) or 1000
-local touchdownZoneRadius = tonumber(modOptions.touchdown_zone_radius) or 400
+-- Touchdown mode: hold units in the enemy start box to score (tug-of-war victory).
+-- The scoring zones ARE the allyteam start boxes (set via StartRect in the host script),
+-- so commander placement is engine-restricted to them and they draw during placement.
+local touchdownMode     = asBool(modOptions.micro_wars_touchdown, false)
+local touchdownWinScore = tonumber(modOptions.touchdown_win_score) or 1000
 
 -- Reinforcements: a starting force plus periodic waves spawned beside each commander.
 -- Lists are written as "unitname count, unitname count" (e.g. "armpw 10,armrock 5,armwar 2").
@@ -855,6 +856,7 @@ local initialCommanderPositions = {}
 local commanders = {}              -- unitID -> teamID (invincible / neutral / energy-generating commanders)
 local lastReinforceFrame = 0       -- touchdown: frame of the last reinforcement wave
 local touchdownPoints = {}         -- touchdown: teamID -> accumulated points
+local touchdownBoxes = {}          -- touchdown: allyTeamID -> {x1, z1, x2, z2} start box
 
 local FIRST_SPAWN_FRAME = 90       -- ~3s: let commanders land before the first wave
 local GRACE = 150                  -- ~5s before a round can be resolved
@@ -1055,16 +1057,29 @@ local function spawnList(teamID, list)
     end
 end
 
--- count a team's (non-commander) units standing inside a zone
-local function countTeamUnitsInZone(teamID, zonePos)
-    local units = Spring.GetUnitsInCylinder(zonePos[1], zonePos[3], touchdownZoneRadius)
-    local n = 0
-    for _, uid in ipairs(units) do
-        if Spring.GetUnitTeam(uid) == teamID and not commanders[uid] then
-            n = n + 1
+-- read each allyteam's start box (set via StartRect in the host script) once
+local function loadTouchdownBoxes()
+    for _, teamID in ipairs(activeTeams) do
+        local at = allyOf(teamID)
+        if touchdownBoxes[at] == nil then
+            local x1, z1, x2, z2 = Spring.GetAllyTeamStartBox(at)
+            if x1 and x2 and x2 > x1 and z2 > z1 then
+                touchdownBoxes[at] = { x1, z1, x2, z2 }
+            end
         end
     end
-    return n
+end
+
+-- count a team's (non-commander) units standing inside a start box
+local function countTeamUnitsInBox(teamID, box)
+    local units = Spring.GetUnitsInRectangle(box[1], box[2], box[3], box[4])
+    local cnt = 0
+    for _, uid in ipairs(units) do
+        if Spring.GetUnitTeam(uid) == teamID and not commanders[uid] then
+            cnt = cnt + 1
+        end
+    end
+    return cnt
 end
 
 local function touchdownWin(winner, reason)
@@ -1087,6 +1102,7 @@ local function runTouchdown(n)
             currentRound = 1
             currentRoundFrameStart = n
             lastReinforceFrame = n
+            loadTouchdownBoxes()
             for _, teamID in ipairs(activeTeams) do
                 spawnList(teamID, reinforcementInitial)
             end
@@ -1106,13 +1122,14 @@ local function runTouchdown(n)
         Spring.Echo("Micro Wars: reinforcements deployed.")
     end
 
-    -- score once per second: +1 per unit standing in an enemy zone
+    -- score once per second: +1 per unit standing in an enemy allyteam's start box
     if n % 30 == 0 then
         for _, teamID in ipairs(activeTeams) do
+            local myAlly = allyOf(teamID)
             local gained = 0
-            for _, enemyID in ipairs(activeTeams) do
-                if enemyID ~= teamID and initialCommanderPositions[enemyID] then
-                    gained = gained + countTeamUnitsInZone(teamID, initialCommanderPositions[enemyID])
+            for ally, box in pairs(touchdownBoxes) do
+                if ally ~= myAlly then
+                    gained = gained + countTeamUnitsInBox(teamID, box)
                 end
             end
             touchdownPoints[teamID] = (touchdownPoints[teamID] or 0) + gained
@@ -1181,8 +1198,8 @@ function gadget:GameStart()
     if touchdownMode then
         local timer = roundTime > 0 and string.format("%d min limit", roundTimeMin) or "no time limit"
         local wave = reinforcementInterval > 0 and string.format("reinforcements every %ds", reinforcementInterval) or "no reinforcements"
-        Spring.Echo(string.format("Micro Wars TOUCHDOWN started. First to %d points wins. Zone radius %d. %s. %s.",
-            touchdownWinScore, touchdownZoneRadius, timer, wave))
+        Spring.Echo(string.format("Micro Wars TOUCHDOWN started. First to %d points wins. %s. %s.",
+            touchdownWinScore, timer, wave))
         return
     end
     local victory = wipeoutOnly and "destroy the enemy army"
@@ -1216,8 +1233,6 @@ function gadget:GameFrame(n)
                 if udid and UnitDefs[udid].customParams.iscommander then
                     local x, y, z = Spring.GetUnitPosition(unitID)
                     initialCommanderPositions[teamID] = { x, y, z }
-                    Spring.SetGameRulesParam("microwars_zone_" .. teamID .. "_x", x)
-                    Spring.SetGameRulesParam("microwars_zone_" .. teamID .. "_z", z)
                     break
                 end
             end
@@ -1392,19 +1407,37 @@ function gadget:DrawScreen()
     gl.Color(1, 1, 1, 1)
 end
 
--- mark the touchdown zones on the ground in each team's color
+-- a terrain-following rectangle outline (so it hugs hills instead of clipping through)
+local function drawGroundRect(x1, z1, x2, z2)
+    local step = 64
+    gl.BeginEnd(GL.LINE_LOOP, function()
+        local x = x1
+        while x < x2 do gl.Vertex(x, Spring.GetGroundHeight(x, z1) + 8, z1); x = x + step end
+        local z = z1
+        while z < z2 do gl.Vertex(x2, Spring.GetGroundHeight(x2, z) + 8, z); z = z + step end
+        x = x2
+        while x > x1 do gl.Vertex(x, Spring.GetGroundHeight(x, z2) + 8, z2); x = x - step end
+        z = z2
+        while z > z1 do gl.Vertex(x1, Spring.GetGroundHeight(x1, z) + 8, z); z = z - step end
+    end)
+end
+
+-- mark each allyteam's start box (the touchdown zone) on the ground in its color
 function gadget:DrawWorld()
     if not touchdownMode then return end
     if (Spring.GetGameRulesParam("microwars_round") or 0) < 1 then return end
-    gl.LineWidth(3)
+    gl.LineWidth(4)
+    local drawn = {}
     for _, teamID in ipairs(activeTeamList()) do
-        local x = Spring.GetGameRulesParam("microwars_zone_" .. teamID .. "_x")
-        local z = Spring.GetGameRulesParam("microwars_zone_" .. teamID .. "_z")
-        if x and z then
-            local yy = Spring.GetGroundHeight(x, z)
-            local r, g, b = Spring.GetTeamColor(teamID)
-            gl.Color(r or 1, g or 1, b or 1, 0.75)
-            gl.DrawGroundCircle(x, yy, z, touchdownZoneRadius, 64)
+        local _, _, _, _, _, ally = Spring.GetTeamInfo(teamID)
+        if ally and not drawn[ally] then
+            local x1, z1, x2, z2 = Spring.GetAllyTeamStartBox(ally)
+            if x1 and x2 and x2 > x1 and z2 > z1 then
+                drawn[ally] = true
+                local r, g, b = Spring.GetTeamColor(teamID)
+                gl.Color(r or 1, g or 1, b or 1, 0.8)
+                drawGroundRect(x1, z1, x2, z2)
+            end
         end
     end
     gl.LineWidth(1)
