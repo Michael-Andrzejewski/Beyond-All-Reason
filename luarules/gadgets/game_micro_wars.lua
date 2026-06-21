@@ -51,6 +51,7 @@ end
 
 local reinforcementInitial = parseUnitList(modOptions.reinforcement_initial)
 local reinforcementWave    = parseUnitList(modOptions.reinforcement_wave)
+local reinforcementWaveAlt = parseUnitList(modOptions.reinforcement_wave_alt)  -- added on every 2nd wave
 
 function gadget:GetInfo()
     return {
@@ -855,6 +856,7 @@ local roundWins = {}               -- teamID -> wins
 local initialCommanderPositions = {}
 local commanders = {}              -- unitID -> teamID (invincible / neutral / energy-generating commanders)
 local lastReinforceFrame = 0       -- touchdown: frame of the last reinforcement wave
+local reinforceWaveNum = 0         -- touchdown: how many waves have spawned (for the every-other bonus)
 local touchdownPoints = {}         -- touchdown: teamID -> accumulated points
 local touchdownBoxes = {}          -- touchdown: allyTeamID -> {x1, z1, x2, z2} start box
 
@@ -916,6 +918,10 @@ local function GetCommanderPosition(teamID)
 end
 
 local function SpawnUnitsForTeam(teamID, unitName, count)
+    if not UnitDefNames[unitName] then
+        Spring.Echo("Micro Wars: WARNING unknown unit '" .. tostring(unitName) .. "' (not spawned; check the codename / faction)")
+        return
+    end
     local x, y, z = GetCommanderPosition(teamID)
     count = math.floor(count * unitsPerRoundMultiplier)
     local list = unitSpawns[teamID] or {}
@@ -1112,14 +1118,18 @@ local function runTouchdown(n)
         return
     end
 
-    -- periodic reinforcement waves
-    if reinforcementInterval > 0 and #reinforcementWave > 0
+    -- periodic reinforcement waves (+ a bonus list on every 2nd wave)
+    if reinforcementInterval > 0 and (#reinforcementWave > 0 or #reinforcementWaveAlt > 0)
        and (n - lastReinforceFrame) >= reinforcementInterval * 30 then
         lastReinforceFrame = n
+        reinforceWaveNum = reinforceWaveNum + 1
+        local withAlt = (#reinforcementWaveAlt > 0 and reinforceWaveNum % 2 == 0)
         for _, teamID in ipairs(activeTeams) do
             spawnList(teamID, reinforcementWave)
+            if withAlt then spawnList(teamID, reinforcementWaveAlt) end
         end
-        Spring.Echo("Micro Wars: reinforcements deployed.")
+        Spring.Echo(string.format("Micro Wars: reinforcements deployed (wave %d%s).",
+            reinforceWaveNum, withAlt and ", +bonus" or ""))
     end
 
     -- score once per second: +1 per unit standing in an enemy allyteam's start box
