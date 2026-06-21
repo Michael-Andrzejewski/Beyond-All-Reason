@@ -27,6 +27,30 @@ local showTimer      = asBool(modOptions.micro_wars_show_timer, true)
 local despawnUnits   = asBool(modOptions.micro_wars_despawn, true)
 local commanderRadar = asBool(modOptions.micro_wars_commander_radar, false)  -- 50x commander radar
 
+-- Touchdown mode: hold units in the enemy starter zone to score (tug-of-war victory).
+local touchdownMode       = asBool(modOptions.micro_wars_touchdown, false)
+local touchdownWinScore   = tonumber(modOptions.touchdown_win_score) or 1000
+local touchdownZoneRadius = tonumber(modOptions.touchdown_zone_radius) or 400
+
+-- Reinforcements: a starting force plus periodic waves spawned beside each commander.
+-- Lists are written as "unitname count, unitname count" (e.g. "armpw 10,armrock 5,armwar 2").
+local reinforcementInterval = tonumber(modOptions.reinforcement_interval) or 0   -- seconds; 0 = off
+
+local function parseUnitList(str)
+    local list = {}
+    if not str or str == "" then return list end
+    for entry in string.gmatch(str, "[^,]+") do
+        local name, count = string.match(entry, "^%s*([%w_]+)%s+(%d+)%s*$")
+        if name and count then
+            list[#list + 1] = { unitName = name, count = tonumber(count) }
+        end
+    end
+    return list
+end
+
+local reinforcementInitial = parseUnitList(modOptions.reinforcement_initial)
+local reinforcementWave    = parseUnitList(modOptions.reinforcement_wave)
+
 function gadget:GetInfo()
     return {
         name    = "Micro Wars",
@@ -829,6 +853,8 @@ local unitSpawns = {}              -- teamID -> { unitID }
 local roundWins = {}               -- teamID -> wins
 local initialCommanderPositions = {}
 local commanders = {}              -- unitID -> teamID (invincible / neutral / energy-generating commanders)
+local lastReinforceFrame = 0       -- touchdown: frame of the last reinforcement wave
+local touchdownPoints = {}         -- touchdown: teamID -> accumulated points
 
 local FIRST_SPAWN_FRAME = 90       -- ~3s: let commanders land before the first wave
 local GRACE = 150                  -- ~5s before a round can be resolved
@@ -1011,6 +1037,111 @@ local function resolveRound(winner, reason)
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Touchdown mode: occupy the enemy starter zone for points (tug-of-war)
+-- ---------------------------------------------------------------------------
+
+local function touchdownScoreLine()
+    local parts = {}
+    for _, teamID in ipairs(activeTeams) do
+        parts[#parts + 1] = string.format("%s %d", teamLabel(teamID), math.floor(touchdownPoints[teamID] or 0))
+    end
+    return table.concat(parts, " | ")
+end
+
+local function spawnList(teamID, list)
+    for _, c in ipairs(list) do
+        SpawnUnitsForTeam(teamID, c.unitName, c.count)
+    end
+end
+
+-- count a team's (non-commander) units standing inside a zone
+local function countTeamUnitsInZone(teamID, zonePos)
+    local units = Spring.GetUnitsInCylinder(zonePos[1], zonePos[3], touchdownZoneRadius)
+    local n = 0
+    for _, uid in ipairs(units) do
+        if Spring.GetUnitTeam(uid) == teamID and not commanders[uid] then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+local function touchdownWin(winner, reason)
+    matchOver = true
+    Spring.SetGameRulesParam("microwars_round_end_frame", 0)
+    if winner then
+        Spring.Echo(string.format("Micro Wars: TOUCHDOWN. %s wins by %s. Final score -- %s",
+            teamLabel(winner), reason, touchdownScoreLine()))
+        Spring.GameOver({ allyOf(winner) })
+    else
+        Spring.Echo("Micro Wars: Touchdown match over. " .. touchdownScoreLine())
+    end
+end
+
+local function runTouchdown(n)
+    -- starting force
+    if not firstSpawnDone then
+        if n >= FIRST_SPAWN_FRAME then
+            firstSpawnDone = true
+            currentRound = 1
+            currentRoundFrameStart = n
+            lastReinforceFrame = n
+            for _, teamID in ipairs(activeTeams) do
+                spawnList(teamID, reinforcementInitial)
+            end
+            publishTimer()
+            Spring.Echo("Micro Wars: Touchdown match begins.")
+        end
+        return
+    end
+
+    -- periodic reinforcement waves
+    if reinforcementInterval > 0 and #reinforcementWave > 0
+       and (n - lastReinforceFrame) >= reinforcementInterval * 30 then
+        lastReinforceFrame = n
+        for _, teamID in ipairs(activeTeams) do
+            spawnList(teamID, reinforcementWave)
+        end
+        Spring.Echo("Micro Wars: reinforcements deployed.")
+    end
+
+    -- score once per second: +1 per unit standing in an enemy zone
+    if n % 30 == 0 then
+        for _, teamID in ipairs(activeTeams) do
+            local gained = 0
+            for _, enemyID in ipairs(activeTeams) do
+                if enemyID ~= teamID and initialCommanderPositions[enemyID] then
+                    gained = gained + countTeamUnitsInZone(teamID, initialCommanderPositions[enemyID])
+                end
+            end
+            touchdownPoints[teamID] = (touchdownPoints[teamID] or 0) + gained
+            Spring.SetGameRulesParam("microwars_td_score_" .. teamID, math.floor(touchdownPoints[teamID]))
+        end
+
+        -- tug-of-war win: one team leads by the score limit (2-team match)
+        if #activeTeams == 2 then
+            local a, b = activeTeams[1], activeTeams[2]
+            local diff = (touchdownPoints[a] or 0) - (touchdownPoints[b] or 0)
+            if diff >= touchdownWinScore then
+                touchdownWin(a, "reaching the score limit"); return
+            elseif -diff >= touchdownWinScore then
+                touchdownWin(b, "reaching the score limit"); return
+            end
+        end
+    end
+
+    -- time limit: whoever leads on points takes the match
+    if roundTime > 0 and (n - currentRoundFrameStart) >= roundTime then
+        local best, bestScore
+        for _, teamID in ipairs(activeTeams) do
+            local s = touchdownPoints[teamID] or 0
+            if not best or s > bestScore then best, bestScore = teamID, s end
+        end
+        touchdownWin(best, "time")
+    end
+end
+
 function gadget:UnitCreated(unitID, unitDefID, unitTeam)
     local ud = UnitDefs[unitDefID]
     if ud and ud.customParams and ud.customParams.iscommander then
@@ -1040,12 +1171,20 @@ function gadget:Initialize()
     for _, teamID in ipairs(activeTeams) do
         unitSpawns[teamID] = {}
         roundWins[teamID] = 0
+        touchdownPoints[teamID] = 0
     end
     Spring.SetGameRulesParam("microwars_round_end_frame", 0)
     Spring.SetGameRulesParam("microwars_round", 0)
 end
 
 function gadget:GameStart()
+    if touchdownMode then
+        local timer = roundTime > 0 and string.format("%d min limit", roundTimeMin) or "no time limit"
+        local wave = reinforcementInterval > 0 and string.format("reinforcements every %ds", reinforcementInterval) or "no reinforcements"
+        Spring.Echo(string.format("Micro Wars TOUCHDOWN started. First to %d points wins. Zone radius %d. %s. %s.",
+            touchdownWinScore, touchdownZoneRadius, timer, wave))
+        return
+    end
     local victory = wipeoutOnly and "destroy the enemy army"
         or string.format("+%d%% domination or time", earlyPct)
     local timer = roundTime > 0 and string.format("%d min/round", roundTimeMin) or "no timer"
@@ -1077,10 +1216,17 @@ function gadget:GameFrame(n)
                 if udid and UnitDefs[udid].customParams.iscommander then
                     local x, y, z = Spring.GetUnitPosition(unitID)
                     initialCommanderPositions[teamID] = { x, y, z }
+                    Spring.SetGameRulesParam("microwars_zone_" .. teamID .. "_x", x)
+                    Spring.SetGameRulesParam("microwars_zone_" .. teamID .. "_z", z)
                     break
                 end
             end
         end
+        return
+    end
+
+    if touchdownMode then
+        runTouchdown(n)
         return
     end
 
@@ -1143,7 +1289,7 @@ end
 
 else
 --------------------------------------------------------------------------------
--- UNSYNCED: round timer + live troop scoreboard; invisible commanders
+-- UNSYNCED: round timer, tug-of-war bar, troop scoreboard; touchdown zones
 --------------------------------------------------------------------------------
 
 local function activeTeamList()
@@ -1171,6 +1317,43 @@ function gadget:UnitCreated(unitID, unitDefID, unitTeam)
     end
 end
 
+-- tug-of-war bar: the rope marker slides toward whoever is winning
+local function drawTugOfWar(cx, topY, vsx)
+    local list = activeTeamList()
+    if #list < 2 then return topY end
+    local a, b = list[1], list[2]
+    local sA = Spring.GetGameRulesParam("microwars_td_score_" .. a) or 0
+    local sB = Spring.GetGameRulesParam("microwars_td_score_" .. b) or 0
+
+    local W = math.min(640, vsx * 0.42)
+    local H = 30
+    local bx = cx - W / 2
+    local top = topY - 4
+    local bot = top - H
+
+    local denom = (touchdownWinScore > 0) and (2 * touchdownWinScore) or 1
+    local f = 0.5 + (sA - sB) / denom
+    if f < 0 then f = 0 elseif f > 1 then f = 1 end
+
+    local ar, ag, ab = Spring.GetTeamColor(a)
+    local br, bg, bb = Spring.GetTeamColor(b)
+
+    gl.Color(0, 0, 0, 0.85)
+    gl.Rect(bx - 3, bot - 3, bx + W + 3, top + 3)
+    gl.Color(ar or 1, ag or 0, ab or 0, 0.95)
+    gl.Rect(bx, bot, bx + f * W, top)
+    gl.Color(br or 0, bg or 0, bb or 1, 0.95)
+    gl.Rect(bx + f * W, bot, bx + W, top)
+    gl.Color(1, 1, 1, 0.9)
+    gl.Rect(cx - 1.5, bot - 5, cx + 1.5, top + 5)
+
+    gl.Color(1, 1, 1, 1)
+    gl.Text(tostring(math.floor(sA)), bx + 8, bot + H / 2 - 7, 16, "o")
+    gl.Text(tostring(math.floor(sB)), bx + W - 8, bot + H / 2 - 7, 16, "or")
+
+    return bot - 26
+end
+
 function gadget:DrawScreen()
     local round = Spring.GetGameRulesParam("microwars_round") or 0
     if round < 1 then return end
@@ -1180,17 +1363,22 @@ function gadget:DrawScreen()
 
     if showTimer then
         local endFrame = Spring.GetGameRulesParam("microwars_round_end_frame") or 0
+        local prefix = touchdownMode and "Touchdown" or ("Round " .. round)
         local label
         if endFrame > 0 then
             local remain = (endFrame - Spring.GetGameFrame()) / 30
             if remain < 0 then remain = 0 end
-            label = string.format("Round %d    %d:%02d", round, math.floor(remain / 60), math.floor(remain % 60))
+            label = string.format("%s    %d:%02d", prefix, math.floor(remain / 60), math.floor(remain % 60))
         else
-            label = "Round " .. round
+            label = prefix
         end
         gl.Color(1, 1, 1, 1)
         gl.Text(label, cx, y, 22, "oc")
         y = y - 28
+    end
+
+    if touchdownMode then
+        y = drawTugOfWar(cx, y, vsx)
     end
 
     -- live troop scoreboard, one line per player
@@ -1198,9 +1386,28 @@ function gadget:DrawScreen()
         local troops = Spring.GetGameRulesParam("microwars_army_" .. teamID) or 0
         local r, g, b = Spring.GetTeamColor(teamID)
         gl.Color(r or 1, g or 1, b or 1, 1)
-        gl.Text(string.format("%s: %d troops", playerName(teamID), troops), cx, y, 18, "oc")
+        gl.Text(string.format("%s: %d units", playerName(teamID), troops), cx, y, 18, "oc")
         y = y - 22
     end
+    gl.Color(1, 1, 1, 1)
+end
+
+-- mark the touchdown zones on the ground in each team's color
+function gadget:DrawWorld()
+    if not touchdownMode then return end
+    if (Spring.GetGameRulesParam("microwars_round") or 0) < 1 then return end
+    gl.LineWidth(3)
+    for _, teamID in ipairs(activeTeamList()) do
+        local x = Spring.GetGameRulesParam("microwars_zone_" .. teamID .. "_x")
+        local z = Spring.GetGameRulesParam("microwars_zone_" .. teamID .. "_z")
+        if x and z then
+            local yy = Spring.GetGroundHeight(x, z)
+            local r, g, b = Spring.GetTeamColor(teamID)
+            gl.Color(r or 1, g or 1, b or 1, 0.75)
+            gl.DrawGroundCircle(x, yy, z, touchdownZoneRadius, 64)
+        end
+    end
+    gl.LineWidth(1)
     gl.Color(1, 1, 1, 1)
 end
 
