@@ -32,6 +32,9 @@ local commanderRadar = asBool(modOptions.micro_wars_commander_radar, false)  -- 
 -- so commander placement is engine-restricted to them and they draw during placement.
 local touchdownMode     = asBool(modOptions.micro_wars_touchdown, false)
 local touchdownWinScore = tonumber(modOptions.touchdown_win_score) or 1000
+-- Attacker/defender: if set, ONLY this player slot scores (reach the target to win);
+-- the other player is the defender and wins if time runs out. nil = symmetric tug-of-war.
+local touchdownAttackerSlot = tonumber(modOptions.touchdown_attacker_slot)
 
 -- Reinforcements: a starting force plus periodic waves spawned beside each commander.
 -- Lists are written as "unitname count, unitname count" (e.g. "armpw 10,armrock 5,armwar 2").
@@ -59,6 +62,19 @@ local reinforcementInitialBySlot = {}
 for i = 1, 16 do
     local v = modOptions["reinforcement_initial_p" .. i]
     if v and v ~= "" then reinforcementInitialBySlot[i] = parseUnitList(v) end
+end
+
+-- per-player wave lists and intervals (each falls back to the shared value).
+local reinforcementIntervalBySlot = {}
+local reinforcementWaveBySlot = {}
+local reinforcementWaveAltBySlot = {}
+for i = 1, 16 do
+    local iv = tonumber(modOptions["reinforcement_interval_p" .. i])
+    if iv then reinforcementIntervalBySlot[i] = iv end
+    local w = modOptions["reinforcement_wave_p" .. i]
+    if w and w ~= "" then reinforcementWaveBySlot[i] = parseUnitList(w) end
+    local wa = modOptions["reinforcement_wave_alt_p" .. i]
+    if wa and wa ~= "" then reinforcementWaveAltBySlot[i] = parseUnitList(wa) end
 end
 
 function gadget:GetInfo()
@@ -863,8 +879,8 @@ local unitSpawns = {}              -- teamID -> { unitID }
 local roundWins = {}               -- teamID -> wins
 local initialCommanderPositions = {}
 local commanders = {}              -- unitID -> teamID (invincible / neutral / energy-generating commanders)
-local lastReinforceFrame = 0       -- touchdown: frame of the last reinforcement wave
-local reinforceWaveNum = 0         -- touchdown: how many waves have spawned (for the every-other bonus)
+local lastReinforceFrameBySlot = {}  -- touchdown: player slot -> frame of last wave
+local reinforceWaveNumBySlot = {}    -- touchdown: player slot -> waves spawned (for the every-other bonus)
 local touchdownPoints = {}         -- touchdown: teamID -> accumulated points
 local touchdownBoxes = {}          -- touchdown: allyTeamID -> {x1, z1, x2, z2} start box
 
@@ -1084,13 +1100,17 @@ local function loadTouchdownBoxes()
     end
 end
 
--- count a team's (non-commander) units standing inside a start box
+-- count a team's (non-commander, non-air) units standing inside a start box
 local function countTeamUnitsInBox(teamID, box)
     local units = Spring.GetUnitsInRectangle(box[1], box[2], box[3], box[4])
     local cnt = 0
     for _, uid in ipairs(units) do
         if Spring.GetUnitTeam(uid) == teamID and not commanders[uid] then
-            cnt = cnt + 1
+            local udid = Spring.GetUnitDefID(uid)
+            local ud = udid and UnitDefs[udid]
+            if ud and not ud.canFly then   -- air units do not count toward the score
+                cnt = cnt + 1
+            end
         end
     end
     return cnt
@@ -1115,9 +1135,9 @@ local function runTouchdown(n)
             firstSpawnDone = true
             currentRound = 1
             currentRoundFrameStart = n
-            lastReinforceFrame = n
             loadTouchdownBoxes()
             for idx, teamID in ipairs(activeTeams) do
+                lastReinforceFrameBySlot[idx] = n
                 spawnList(teamID, reinforcementInitialBySlot[idx] or reinforcementInitial)
             end
             publishTimer()
@@ -1126,36 +1146,46 @@ local function runTouchdown(n)
         return
     end
 
-    -- periodic reinforcement waves (+ a bonus list on every 2nd wave)
-    if reinforcementInterval > 0 and (#reinforcementWave > 0 or #reinforcementWaveAlt > 0)
-       and (n - lastReinforceFrame) >= reinforcementInterval * 30 then
-        lastReinforceFrame = n
-        reinforceWaveNum = reinforceWaveNum + 1
-        local withAlt = (#reinforcementWaveAlt > 0 and reinforceWaveNum % 2 == 0)
-        for _, teamID in ipairs(activeTeams) do
-            spawnList(teamID, reinforcementWave)
-            if withAlt then spawnList(teamID, reinforcementWaveAlt) end
+    -- periodic reinforcement waves, per player (own list + interval, +bonus on every 2nd wave)
+    for idx, teamID in ipairs(activeTeams) do
+        local interval = reinforcementIntervalBySlot[idx] or reinforcementInterval
+        local wave     = reinforcementWaveBySlot[idx] or reinforcementWave
+        local waveAlt  = reinforcementWaveAltBySlot[idx] or reinforcementWaveAlt
+        if interval > 0 and (#wave > 0 or #waveAlt > 0)
+           and (n - (lastReinforceFrameBySlot[idx] or n)) >= interval * 30 then
+            lastReinforceFrameBySlot[idx] = n
+            reinforceWaveNumBySlot[idx] = (reinforceWaveNumBySlot[idx] or 0) + 1
+            spawnList(teamID, wave)
+            if #waveAlt > 0 and reinforceWaveNumBySlot[idx] % 2 == 0 then
+                spawnList(teamID, waveAlt)
+            end
         end
-        Spring.Echo(string.format("Micro Wars: reinforcements deployed (wave %d%s).",
-            reinforceWaveNum, withAlt and ", +bonus" or ""))
     end
 
-    -- score once per second: +1 per unit standing in an enemy allyteam's start box
+    -- score once per second: +1 per ground unit in an enemy box.
+    -- In attacker/defender mode only the attacker slot scores.
     if n % 30 == 0 then
-        for _, teamID in ipairs(activeTeams) do
-            local myAlly = allyOf(teamID)
-            local gained = 0
-            for ally, box in pairs(touchdownBoxes) do
-                if ally ~= myAlly then
-                    gained = gained + countTeamUnitsInBox(teamID, box)
+        for idx, teamID in ipairs(activeTeams) do
+            if (not touchdownAttackerSlot) or idx == touchdownAttackerSlot then
+                local myAlly = allyOf(teamID)
+                local gained = 0
+                for ally, box in pairs(touchdownBoxes) do
+                    if ally ~= myAlly then
+                        gained = gained + countTeamUnitsInBox(teamID, box)
+                    end
                 end
+                touchdownPoints[teamID] = (touchdownPoints[teamID] or 0) + gained
             end
-            touchdownPoints[teamID] = (touchdownPoints[teamID] or 0) + gained
-            Spring.SetGameRulesParam("microwars_td_score_" .. teamID, math.floor(touchdownPoints[teamID]))
+            Spring.SetGameRulesParam("microwars_td_score_" .. teamID, math.floor(touchdownPoints[teamID] or 0))
         end
 
-        -- tug-of-war win: one team leads by the score limit (2-team match)
-        if #activeTeams == 2 then
+        if touchdownAttackerSlot then
+            local atkTeam = activeTeams[touchdownAttackerSlot]
+            if atkTeam and (touchdownPoints[atkTeam] or 0) >= touchdownWinScore then
+                touchdownWin(atkTeam, "reaching the score target")
+                return
+            end
+        elseif #activeTeams == 2 then
             local a, b = activeTeams[1], activeTeams[2]
             local diff = (touchdownPoints[a] or 0) - (touchdownPoints[b] or 0)
             if diff >= touchdownWinScore then
@@ -1166,14 +1196,23 @@ local function runTouchdown(n)
         end
     end
 
-    -- time limit: whoever leads on points takes the match
+    -- time limit
     if roundTime > 0 and (n - currentRoundFrameStart) >= roundTime then
-        local best, bestScore
-        for _, teamID in ipairs(activeTeams) do
-            local s = touchdownPoints[teamID] or 0
-            if not best or s > bestScore then best, bestScore = teamID, s end
+        if touchdownAttackerSlot then
+            -- attacker failed to reach the target: the defender holds and wins
+            local defTeam
+            for idx, teamID in ipairs(activeTeams) do
+                if idx ~= touchdownAttackerSlot then defTeam = teamID; break end
+            end
+            touchdownWin(defTeam, "successful defense (time expired)")
+        else
+            local best, bestScore
+            for _, teamID in ipairs(activeTeams) do
+                local s = touchdownPoints[teamID] or 0
+                if not best or s > bestScore then best, bestScore = teamID, s end
+            end
+            touchdownWin(best, "time")
         end
-        touchdownWin(best, "time")
     end
 end
 
@@ -1182,8 +1221,10 @@ function gadget:UnitCreated(unitID, unitDefID, unitTeam)
     if ud and ud.customParams and ud.customParams.iscommander then
         commanders[unitID] = unitTeam
         Spring.SetUnitNeutral(unitID, true)               -- enemies ignore the commander
-        Spring.SetTeamResource(unitTeam, "es", 100000)    -- raise energy storage so income accumulates
-        Spring.SetTeamResource(unitTeam, "e", 100000)     -- start full so weapons can fire immediately
+        Spring.SetTeamResource(unitTeam, "ms", 100000)    -- metal storage 100k
+        Spring.SetTeamResource(unitTeam, "m", 100000)     -- start metal full
+        Spring.SetTeamResource(unitTeam, "es", 100000)    -- energy storage 100k
+        Spring.SetTeamResource(unitTeam, "e", 100000)     -- start energy full so weapons can fire immediately
         if commanderRadar then
             local base = Spring.GetUnitSensorRadius(unitID, "radar") or 0
             if base <= 0 then base = 2000 end
@@ -1215,7 +1256,8 @@ end
 function gadget:GameStart()
     if touchdownMode then
         local timer = roundTime > 0 and string.format("%d min limit", roundTimeMin) or "no time limit"
-        local wave = reinforcementInterval > 0 and string.format("reinforcements every %ds", reinforcementInterval) or "no reinforcements"
+        local hasReinf = reinforcementInterval > 0 or next(reinforcementIntervalBySlot) ~= nil
+        local wave = hasReinf and "reinforcements on" or "no reinforcements"
         Spring.Echo(string.format("Micro Wars TOUCHDOWN started. First to %d points wins. %s. %s.",
             touchdownWinScore, timer, wave))
         return
@@ -1230,10 +1272,16 @@ end
 function gadget:GameFrame(n)
     if matchOver then return end
 
-    -- commanders generate 10k energy/second for their team
+    -- keep commander resource storage at 100k (engine recomputes team storage from units each frame)
+    for _, ct in pairs(commanders) do
+        Spring.SetTeamResource(ct, "ms", 100000)
+        Spring.SetTeamResource(ct, "es", 100000)
+    end
+    -- commanders generate resources for their team (per second)
     if n % 30 == 0 then
         for _, ct in pairs(commanders) do
-            Spring.AddTeamResource(ct, "e", 10000)
+            Spring.AddTeamResource(ct, "m", 10000)    -- 10k metal/sec
+            Spring.AddTeamResource(ct, "e", 100000)   -- 100k energy/sec
         end
     end
 
@@ -1363,6 +1411,21 @@ local function drawTugOfWar(cx, topY, vsx)
     local bx = cx - W / 2
     local top = topY - 4
     local bot = top - H
+
+    -- attacker/defender: single progress bar (0 -> target) in the attacker's colour
+    if touchdownAttackerSlot and list[touchdownAttackerSlot] then
+        local atk = list[touchdownAttackerSlot]
+        local atkScore = Spring.GetGameRulesParam("microwars_td_score_" .. atk) or 0
+        local pf = (touchdownWinScore > 0) and (atkScore / touchdownWinScore) or 0
+        if pf < 0 then pf = 0 elseif pf > 1 then pf = 1 end
+        local r, g, bcol = Spring.GetTeamColor(atk)
+        gl.Color(0, 0, 0, 0.85); gl.Rect(bx - 3, bot - 3, bx + W + 3, top + 3)
+        gl.Color(0.22, 0.22, 0.22, 0.9); gl.Rect(bx, bot, bx + W, top)
+        gl.Color(r or 1, g or 0, bcol or 0, 0.95); gl.Rect(bx, bot, bx + pf * W, top)
+        gl.Color(1, 1, 1, 1)
+        gl.Text(string.format("Attacker  %d / %d", math.floor(atkScore), touchdownWinScore), cx, bot + H / 2 - 7, 16, "oc")
+        return bot - 26
+    end
 
     local denom = (touchdownWinScore > 0) and (2 * touchdownWinScore) or 1
     local f = 0.5 + (sA - sB) / denom
