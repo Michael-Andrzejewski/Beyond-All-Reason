@@ -53,6 +53,14 @@ local reinforcementInitial = parseUnitList(modOptions.reinforcement_initial)
 local reinforcementWave    = parseUnitList(modOptions.reinforcement_wave)
 local reinforcementWaveAlt = parseUnitList(modOptions.reinforcement_wave_alt)  -- added on every 2nd wave
 
+-- per-player starting-force overrides by slot (p1 = first team/host, p2 = second, ...).
+-- If a slot is set it replaces reinforcement_initial for that player only.
+local reinforcementInitialBySlot = {}
+for i = 1, 16 do
+    local v = modOptions["reinforcement_initial_p" .. i]
+    if v and v ~= "" then reinforcementInitialBySlot[i] = parseUnitList(v) end
+end
+
 function gadget:GetInfo()
     return {
         name    = "Micro Wars",
@@ -1109,8 +1117,8 @@ local function runTouchdown(n)
             currentRoundFrameStart = n
             lastReinforceFrame = n
             loadTouchdownBoxes()
-            for _, teamID in ipairs(activeTeams) do
-                spawnList(teamID, reinforcementInitial)
+            for idx, teamID in ipairs(activeTeams) do
+                spawnList(teamID, reinforcementInitialBySlot[idx] or reinforcementInitial)
             end
             publishTimer()
             Spring.Echo("Micro Wars: Touchdown match begins.")
