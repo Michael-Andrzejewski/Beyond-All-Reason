@@ -65,9 +65,12 @@ for i = 1, 16 do
 end
 
 -- per-player wave lists and intervals (each falls back to the shared value).
+-- reinforcement_wave_alt_every_pN = spawn the bonus list every Nth wave (default 2).
 local reinforcementIntervalBySlot = {}
 local reinforcementWaveBySlot = {}
 local reinforcementWaveAltBySlot = {}
+local reinforcementWaveAltEvery = tonumber(modOptions.reinforcement_wave_alt_every) or 2
+local reinforcementWaveAltEveryBySlot = {}
 for i = 1, 16 do
     local iv = tonumber(modOptions["reinforcement_interval_p" .. i])
     if iv then reinforcementIntervalBySlot[i] = iv end
@@ -75,6 +78,8 @@ for i = 1, 16 do
     if w and w ~= "" then reinforcementWaveBySlot[i] = parseUnitList(w) end
     local wa = modOptions["reinforcement_wave_alt_p" .. i]
     if wa and wa ~= "" then reinforcementWaveAltBySlot[i] = parseUnitList(wa) end
+    local ae = tonumber(modOptions["reinforcement_wave_alt_every_p" .. i])
+    if ae then reinforcementWaveAltEveryBySlot[i] = ae end
 end
 
 function gadget:GetInfo()
@@ -1156,7 +1161,8 @@ local function runTouchdown(n)
             lastReinforceFrameBySlot[idx] = n
             reinforceWaveNumBySlot[idx] = (reinforceWaveNumBySlot[idx] or 0) + 1
             spawnList(teamID, wave)
-            if #waveAlt > 0 and reinforceWaveNumBySlot[idx] % 2 == 0 then
+            local altEvery = reinforcementWaveAltEveryBySlot[idx] or reinforcementWaveAltEvery
+            if #waveAlt > 0 and altEvery > 0 and reinforceWaveNumBySlot[idx] % altEvery == 0 then
                 spawnList(teamID, waveAlt)
             end
         end
