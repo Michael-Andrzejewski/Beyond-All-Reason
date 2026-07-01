@@ -1,0 +1,27 @@
+{
+  "name": "Pawn Flood (Mark attacks)",
+  "description": "Mark floods with Pawns plus jammers, Negotiators, and a Myrmidon every minute. Michael defends with Vanguards, Arquebus spiders, and Phoenixes. Attacker needs 40000 points in 20 minutes.",
+  "map": "Quicksilver Remake 1.24",
+  "roundTimeMin": 20,
+  "unitsPerRound": 1,
+  "touchdown": true,
+  "wipeoutOnly": false,
+  "winScore": 40000,
+  "attackerSlot": 2,
+  "players": [
+    {
+      "initial": "armvang 5,legsrail 100,legphoenix 5",
+      "wave": "",
+      "interval": 0,
+      "waveAlt": "",
+      "altEvery": 2
+    },
+    {
+      "initial": "armpw 200",
+      "wave": "armpw 50,armaser 5,corvroc 2",
+      "interval": 15,
+      "waveAlt": "legeallterrainmech 1",
+      "altEvery": 4
+    }
+  ]
+}

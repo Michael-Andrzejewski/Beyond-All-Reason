@@ -1,0 +1,27 @@
+{
+  "name": "Heavy Push (25k)",
+  "description": "Symmetric touchdown with heavier waves. Both start with 100 Pawns and a Vanguard. Waves bring a Sheldon, Centurions, Maces, and Pawns; every other wave adds 2 Phoenixes and a Shredder. First to lead by 25000 wins.",
+  "map": "Quicksilver Remake 1.24",
+  "roundTimeMin": 20,
+  "unitsPerRound": 1,
+  "touchdown": true,
+  "wipeoutOnly": false,
+  "winScore": 25000,
+  "attackerSlot": 0,
+  "players": [
+    {
+      "initial": "armpw 100,armvang 1",
+      "wave": "cormort 1,armwar 5,armham 5,armpw 25",
+      "interval": 30,
+      "waveAlt": "legphoenix 2,armyork 1",
+      "altEvery": 2
+    },
+    {
+      "initial": "armpw 100,armvang 1",
+      "wave": "cormort 1,armwar 5,armham 5,armpw 25",
+      "interval": 30,
+      "waveAlt": "legphoenix 2,armyork 1",
+      "altEvery": 2
+    }
+  ]
+}

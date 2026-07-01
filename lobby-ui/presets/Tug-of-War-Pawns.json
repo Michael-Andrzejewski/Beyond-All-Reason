@@ -1,0 +1,27 @@
+{
+  "name": "Tug of War: Pawns",
+  "description": "Symmetric touchdown. Both start with 100 Pawns and get 10 Pawns, 5 Rocketeers, and 2 Centurions every 30 seconds. First to lead by 5000 points wins.",
+  "map": "Quicksilver Remake 1.24",
+  "roundTimeMin": 15,
+  "unitsPerRound": 1,
+  "touchdown": true,
+  "wipeoutOnly": false,
+  "winScore": 5000,
+  "attackerSlot": 0,
+  "players": [
+    {
+      "initial": "armpw 100",
+      "wave": "armpw 10,armrock 5,armwar 2",
+      "interval": 30,
+      "waveAlt": "",
+      "altEvery": 2
+    },
+    {
+      "initial": "armpw 100",
+      "wave": "armpw 10,armrock 5,armwar 2",
+      "interval": 30,
+      "waveAlt": "",
+      "altEvery": 2
+    }
+  ]
+}

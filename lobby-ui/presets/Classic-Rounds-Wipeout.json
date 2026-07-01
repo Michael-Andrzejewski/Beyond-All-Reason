@@ -1,0 +1,15 @@
+{
+  "name": "Classic Rounds: Wipeout",
+  "description": "Round mode, no touchdown. Destroy every enemy unit (except the commander) to win the round. 10 minute rounds with the preset army compositions.",
+  "map": "Quicksilver Remake 1.24",
+  "roundTimeMin": 10,
+  "unitsPerRound": 1,
+  "touchdown": false,
+  "wipeoutOnly": true,
+  "winScore": 40000,
+  "attackerSlot": 0,
+  "players": [
+    { "initial": "", "wave": "", "interval": 0, "waveAlt": "", "altEvery": 2 },
+    { "initial": "", "wave": "", "interval": 0, "waveAlt": "", "altEvery": 2 }
+  ]
+}
